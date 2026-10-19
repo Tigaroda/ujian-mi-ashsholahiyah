@@ -1,203 +1,176 @@
 import streamlit as st
 import pandas as pd
+import gspread
+from google.oauth2.service_account import Credentials
 from datetime import datetime
 
 # --- 1. KONFIGURASI HALAMAN ---
 st.set_page_config(
     page_title="Ujian MI Ashsholahiyah Cilamaya",
     page_icon="🏫",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# --- 2. INISIALISASI DATABASE LOKAL (SESSION STATE) ---
-# Berfungsi agar data tetap tersimpan saat berpindah menu sebelum dihubungkan ke Google Sheets
-if 'siswa_db' not in st.session_state:
-    st.session_state.siswa_db = pd.DataFrame([
-        {"kelas": "Kelas 4", "rombel": "A", "no_peserta": "20260401", "nama": "AHMAD FAUZAN", "password": "123"},
-        {"kelas": "Kelas 4", "rombel": "A", "no_peserta": "20260402", "nama": "SITI AMINAH", "password": "123"},
-        {"kelas": "Kelas 5", "rombel": "A", "no_peserta": "20260501", "nama": "SIHATUL AFIAH", "password": "123"},
-    ])
+# --- 2. KONEKSI GOOGLE SHEETS API ---
+@st.cache_resource(ttl=60)
+def init_connection():
+    scope = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    # Membaca credentials dari st.secrets (TOML)
+    creds_dict = dict(st.secrets["gsheets"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+    client = gspread.authorize(creds)
+    return client
 
-if 'guru_db' not in st.session_state:
-    st.session_state.guru_db = pd.DataFrame([
-        {"nama_guru": "Ust. Ahmad, S.Pd", "kelas_ajar": "Kelas 4", "password": "guru4"},
-        {"nama_guru": "Hj. Fatimah, S.Pd.I", "kelas_ajar": "Kelas 5", "password": "guru5"},
-    ])
+try:
+    client = init_connection()
+    # Membuka Spreadsheet berdasarkan sheet_name di Secrets atau nama langsung
+    sheet_name = st.secrets["gsheets"].get("sheet_name", "DB_Ujian_MI_Ashsholahiyah")
+    spreadsheet = client.open(sheet_name)
+    db_terhubung = True
+except Exception as e:
+    db_terhubung = False
+    st.error(f"Gagal terhubung ke Google Sheets. Periksa konfigurasi Secrets. Error: {e}")
 
-if 'logged_in_admin' not in st.session_state:
-    st.session_state.logged_in_admin = False
-if 'logged_in_guru' not in st.session_state:
-    st.session_state.logged_in_guru = None
-if 'logged_in_siswa' not in st.session_state:
-    st.session_state.logged_in_siswa = None
+# Fungsi membaca data dari tab tertentu
+def load_data(tab_name):
+    if not db_terhubung:
+        return pd.DataFrame()
+    sheet = spreadsheet.worksheet(tab_name)
+    data = sheet.get_all_records()
+    return pd.DataFrame(data)
 
-# --- 3. HEADER & WIDGET REAL-TIME ---
+# Fungsi menambah baris baru ke tab tertentu
+def append_data(tab_name, row_list):
+    if db_terhubung:
+        sheet = spreadsheet.worksheet(tab_name)
+        sheet.append_row(row_list)
+        st.cache_data.clear()
+
+# --- 3. HEADER & WIDGET INFO ---
 st.markdown("<h1 style='text-align: center; color: #0d5c3b;'>UJIAN MI ASHSHOLAHIYAH CILAMAYA</h1>", unsafe_allow_html=True)
 
-col_info1, col_info2, col_info3 = st.columns(3)
-with col_info1:
-    st.markdown(f"📅 **Hari/Tanggal:** {datetime.now().strftime('%A, %d %b %Y')}")
-with col_info2:
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.markdown(f"📅 **Hari/Tanggal:** {datetime.now().strftime('%d %b %Y')}")
+with col2:
     st.markdown(f"⏰ **Jam:** {datetime.now().strftime('%H:%M:%S')} WIB")
-with col_info3:
-    st.markdown("🟢 **Online:** 3 Siswa | 2 Guru")
+with col3:
+    if db_terhubung:
+        st.success("🟢 Google Sheets Connected")
+    else:
+        st.error("🔴 Google Sheets Disconnected")
 
 st.markdown("---")
 
-# --- 4. NAVIGASI UTAMA (SIDEBAR & TOP MODAL) ---
+# --- 4. NAVIGASI UTAMA ---
 st.sidebar.title("Navigasi Sistem")
-menu_pilihan = st.sidebar.radio("Pilih Portal:", ["Portal Siswa", "Ruang Guru", "Ruang Admin"])
+menu = st.sidebar.radio("Pilih Portal:", ["Portal Siswa", "Ruang Guru", "Ruang Admin"])
+
+# Inisialisasi State Login
+if "admin_logged_in" not in st.session_state:
+    st.session_state.admin_logged_in = False
+if "guru_logged_in" not in st.session_state:
+    st.session_state.guru_logged_in = None
 
 # ==========================================
-# 5. PORTAL SISWA (LOGIN & UJIAN)
+# 5. RUANG ADMIN MASTER
 # ==========================================
-if menu_pilihan == "Portal Siswa":
-    if st.session_state.logged_in_siswa is None:
-        st.subheader("🎓 Pintu Masuk Siswa Ujian")
-        st.markdown("Silakan pilih kelas, masukkan nomor peserta dan password yang tertera pada kartu ujian.")
-        
-        with st.form("form_login_siswa"):
-            pilih_kelas = st.selectbox("Pilih Kelas", ["Kelas 1", "Kelas 2", "Kelas 3", "Kelas 4", "Kelas 5", "Kelas 6"])
-            no_peserta_input = st.text_input("Nomor Peserta")
-            password_input = st.text_input("Password / Sandi", type="password")
-            btn_login_siswa = st.form_submit_button("Masuk Kelas Ujian")
-            
-            if btn_login_siswa:
-                # Validasi ke Database Siswa
-                df_siswa = st.session_state.siswa_db
-                cek = df_siswa[(df_siswa['kelas'] == pilih_kelas) & 
-                               (df_siswa['no_peserta'] == no_peserta_input) & 
-                               (df_siswa['password'] == password_input)]
-                
-                if not cek.empty:
-                    st.session_state.logged_in_siswa = cek.iloc[0].to_dict()
-                    st.success(f"Berhasil Masuk! Selamat Datang, {cek.iloc[0]['nama']}")
+if menu == "Ruang Admin":
+    if not st.session_state.admin_logged_in:
+        st.subheader("🔐 Login Admin Master")
+        with st.form("login_admin_form"):
+            u = st.text_input("Username")
+            p = st.text_input("Password", type="password")
+            btn = st.form_submit_button("Masuk Admin")
+            if btn:
+                if u == "nasruddinrudi" and p == "nasruddinHoja":
+                    st.session_state.admin_logged_in = True
+                    st.success("Login Berhasil!")
                     st.rerun()
                 else:
-                    st.error("Gagal Masuk! Periksa kembali Kelas, Nomor Peserta, atau Password Anda.")
-    else:
-        # Tampilan Ruang Ujian Siswa
-        siswa = st.session_state.logged_in_siswa
-        st.info(wel := f"Halo, **{siswa['nama']}** ({siswa['kelas']} - Rombel {siswa['rombel']})")
-        
-        if st.button("Keluar / Logout Siswa"):
-            st.session_state.logged_in_siswa = None
-            st.rerun()
-            
-        st.markdown("---")
-        st.subheader("📝 Lembar Ujian Online (Simulasi)")
-        st.warning("Mata Pelajaran Aktif: **Kurikulum Merdeka - Koding & Kecerdasan Artifisial (KKA)**")
-        
-        # Simulasi 1 Soal Per Layar (Exam Engine)
-        st.markdown("**Soal 1 dari 10:** Apa kepanjangan dari AI dalam teknologi komputer?")
-        opsi = st.radio("Pilih Jawaban:", ["A. Artifisial Intelligence", "B. Automated Item", "C. Aplikasi Internet", "D. Arsitektur Informasi"], key="soal_1")
-        
-        col_prev, col_next = st.columns([1, 1])
-        with col_prev:
-            st.button("⬅️ Sebelumnya")
-        with col_next:
-            if st.button("Selanjutnya ➡️"):
-                st.toast("Jawaban tersimpan otomatis (Auto-Save Active)")
-                
-        st.markdown("---")
-        if st.button("Selesai & Kirim Ujian", type="primary"):
-            st.success("Ujian berhasil diselesaikan dan dikirim ke server guru!")
-
-# ==========================================
-# 6. RUANG GURU KELAS
-# ==========================================
-elif menu_pilihan == "Ruang Guru":
-    if st.session_state.logged_in_guru is None:
-        st.subheader("👨‍🏫 Login Ruang Guru Kelas")
-        with st.form("form_login_guru"):
-            nama_guru_input = st.text_input("Nama Guru / ID")
-            pass_guru_input = st.text_input("Password Guru", type="password")
-            btn_login_guru = st.form_submit_button("Masuk Ruang Guru")
-            
-            if btn_login_guru:
-                df_guru = st.session_state.guru_db
-                cek_guru = df_guru[(df_guru['nama_guru'].str.lower() == nama_guru_input.lower()) & 
-                                   (df_guru['password'] == pass_guru_input)]
-                if not cek_guru.empty or (nama_guru_input == "guru" and pass_guru_input == "123"):
-                    st.session_state.logged_in_guru = nama_guru_input
-                    st.success("Login Guru Berhasil!")
-                    st.rerun()
-                else:
-                    st.error("Nama atau Password Guru salah.")
-    else:
-        st.subheader(f"📊 Dashboard Guru: {st.session_state.logged_in_guru}")
-        if st.button("Logout Guru"):
-            st.session_state.logged_in_guru = None
-            st.rerun()
-            
-        tab1, tab2, tab3 = st.tabs(["Data Siswa Kelas", "Monitoring Ujian", "Koreksi & Rekap Nilai"])
-        with tab1:
-            st.markdown("### Daftar Siswa di Kelas Anda")
-            st.dataframe(st.session_state.siswa_db, use_container_width=True)
-        with tab2:
-            st.markdown("### Status Pengerjaan Siswa Secara Real-Time")
-            st.write("Belum ada sesi ujian aktif.")
-        with tab3:
-            st.markdown("### Koreksi Manual Esai & Nilai Akhir")
-            st.write("Fitur rekap nilai siap digunakan.")
-
-# ==========================================
-# 7. RUANG ADMIN MASTER
-# ==========================================
-elif menu_pilihan == "Ruang Admin":
-    if not st.session_state.logged_in_admin:
-        st.subheader("🔐 Login Admin Master (Superadmin)")
-        with st.form("form_login_admin"):
-            username_admin = st.text_input("Username Admin")
-            password_admin = st.text_input("Password Admin", type="password")
-            btn_login_admin = st.form_submit_button("Masuk Admin")
-            
-            if btn_login_admin:
-                # Kredensial sesuai permintaan
-                if username_admin == "nasruddinrudi" and password_admin == "nasruddinHoja":
-                    st.session_state.logged_in_admin = True
-                    st.success("Login Admin Berhasil!")
-                    st.rerun()
-                else:
-                    st.error("Username atau Password Admin salah! (Gunakan: nasruddinrudi / nasruddinHoja)")
+                    st.error("Username / Password Admin Salah!")
     else:
         st.subheader("👑 Panel Kontrol Utama Admin Master")
         if st.button("Logout Admin"):
-            st.session_state.logged_in_admin = False
+            st.session_state.admin_logged_in = False
             st.rerun()
+
+        tab1, tab2, tab3 = st.tabs(["Manajemen Siswa", "Manajemen Guru", "Bank Soal"])
+
+        # --- TAB MANAJEMEN GURU (SINKRON GOOGLE SHEETS) ---
+        with tab2:
+            st.markdown("### Kelola Akun Guru Kelas (Data Live dari Google Sheets)")
             
-        tab_adm1, tab_adm2, tab_adm3, tab_adm4 = st.tabs(["Manajemen Siswa", "Manajemen Guru", "Bank Soal (14 Mapel)", "Pengaturan & OTP"])
+            # Membaca data langsung dari tab 'Guru' di Google Sheets
+            df_guru = load_data("Guru")
+            st.dataframe(df_guru, use_container_width=True)
+
+            st.markdown("---")
+            st.markdown("#### Tambah Guru Baru ke Google Sheets")
+            with st.form("tambah_guru_form"):
+                nama_guru = st.text_input("Nama Guru")
+                kelas_ajar = st.text_input("Kelas Ajar (misal: 4 / 1a)")
+                pass_guru = st.text_input("Password Guru")
+                btn_simpan_guru = st.form_submit_button("Simpan Guru ke Google Sheets")
+
+                if btn_simpan_guru and nama_guru:
+                    # Menambahkan data ke baris paling bawah tab 'Guru'
+                    append_data("Guru", [nama_guru, kelas_ajar, pass_guru, "offline", "offline"])
+                    st.success(f"Guru {nama_guru} berhasil ditambahkan ke Google Sheets!")
+                    st.rerun()
+
+        # --- TAB MANAJEMEN SISWA ---
+        with tab1:
+            st.markdown("### Database Siswa")
+            df_siswa = load_data("Siswa")
+            st.dataframe(df_siswa, use_container_width=True)
+
+        # --- TAB BANK SOAL ---
+        with tab3:
+            st.markdown("### Bank Soal")
+            df_soal = load_data("BankSoal")
+            st.dataframe(df_soal, use_container_width=True)
+
+# ==========================================
+# 6. RUANG GURU
+# ==========================================
+elif menu == "Ruang Guru":
+    st.subheader("👨‍🏫 Login Ruang Guru Kelas")
+    df_guru = load_data("Guru")
+    
+    with st.form("login_guru_form"):
+        u_guru = st.text_input("Nama / Username Guru")
+        p_guru = st.text_input("Password", type="password")
+        btn_g = st.form_submit_button("Masuk Ruang Guru")
         
-        with tab_adm1:
-            st.markdown("### Tambah / Kelola Database Siswa")
-            with st.form("tambah_siswa"):
-                c1, c2 = st.columns(2)
-                with c1:
-                    tk = st.selectbox("Kelas", ["Kelas 1", "Kelas 2", "Kelas 3", "Kelas 4", "Kelas 5", "Kelas 6"])
-                    tr = st.text_input("Rombel", "A")
-                    np = st.text_input("Nomor Peserta")
-                with c2:
-                    ns = st.text_input("Nama Siswa (Otomatis Kapital)")
-                    ps = st.text_input("Password Siswa", "123")
-                
-                submit_siswa = st.form_submit_button("Simpan Data Siswa Baru")
-                if submit_siswa and np and ns:
-                    new_row = {"kelas": tk, "rombel": tr, "no_peserta": np, "nama": ns.upper(), "password": ps}
-                    st.session_state.siswa_db = pd.concat([st.session_state.siswa_db, pd.DataFrame([new_row])], ignore_index=True)
-                    st.success(f"Siswa {ns.upper()} berhasil ditambahkan!")
-            
-            st.markdown("#### Tabel Seluruh Siswa")
-            st.dataframe(st.session_state.siswa_db, use_container_width=True)
-            
-        with tab_adm2:
-            st.markdown("### Kelola Akun Guru Kelas")
-            st.dataframe(st.session_state.guru_db, use_container_width=True)
-            
-        with tab_adm3:
-            st.markdown("### Manajemen 14 Mata Pelajaran Kurikulum Merdeka & KKA")
-            st.info("Mendukung 14 Mapel: Akidah Akhlak, Al-Qur'an Hadits, Fikih, SKI, Pancasila, Bahasa Indonesia, IPAS, Matematika, PJOK, SBdP, Bahasa Arab, Bahasa Sunda, Bahasa Inggris, dan Koding & Kecerdasan Artifisial (KKA).")
-            
-        with tab_adm4:
-            st.markdown("### Keamanan 2FA & WhatsApp Gateway (085719824453)")
-            st.success("Integrasi WhatsApp Gateway aktif untuk pengiriman OTP Admin.")
+        if btn_g and not df_guru.empty:
+            # Validasi langsung dengan data di Google Sheets
+            cek = df_guru[(df_guru['nama_guru'].astype(str).str.lower() == u_guru.lower()) & 
+                          (df_guru['password'].astype(str) == str(p_guru))]
+            if not cek.empty:
+                st.success(f"Selamat Datang, {u_guru}!")
+            else:
+                st.error("Data guru tidak ditemukan di Google Sheets.")
+
+# ==========================================
+# 7. PORTAL SISWA
+# ==========================================
+elif menu == "Portal Siswa":
+    st.subheader("🎓 Portal Masuk Ujian Siswa")
+    df_siswa = load_data("Siswa")
+    
+    with st.form("login_siswa_form"):
+        no_p = st.text_input("Nomor Peserta")
+        pass_s = st.text_input("Password", type="password")
+        btn_s = st.form_submit_button("Masuk Ujian")
+        
+        if btn_s and not df_siswa.empty:
+            cek_s = df_siswa[(df_siswa['no_peserta'].astype(str) == str(no_p)) & 
+                             (df_siswa['password'].astype(str) == str(pass_s))]
+            if not cek_s.empty:
+                st.success(f"Selamat Mengerjakan, {cek_s.iloc[0]['nama']}!")
+            else:
+                st.error("Nomor Peserta atau Password Siswa Salah.")
